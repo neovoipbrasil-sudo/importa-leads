@@ -108,7 +108,7 @@
       </div>
       <div>
         <label>&nbsp;</label>
-        <label class="check"><input type="checkbox" id="skipDup" checked> Pular CNPJs que já existem como lead no Bitrix24</label>
+        <label class="check"><input type="checkbox" id="skipDup" checked> Não recadastrar CNPJs que já existem como lead (os contatos deles no Bitrix entram nas listas do responsável atual)</label>
         <label class="check"><input type="checkbox" id="dryRun"> Simulação (não grava nada no Bitrix24, só gera as listas)</label>
       </div>
     </div>
@@ -414,20 +414,27 @@ $('btnStart').onclick = async () => {
   log(dry ? 'MODO SIMULAÇÃO — nada será gravado.' : 'Iniciando importação.');
 
   try {
-    // 1) duplicados
+    // 1) duplicados: leads já existentes são pulados, mas os telefones dos contatos
+    //    vinculados a eles no Bitrix entram nas Listas A/B do responsável atual do lead
+    const existentesInfo = [];   // [{ cnpj, leadId, sellerId, contatos: [[fones]] }]
     if ($('skipDup').checked && webhook()) {
       log('Verificando CNPJs já existentes no Bitrix24…');
       const existentes = new Map(); let feito = 0;
       for (const grupo of chunks(fila, BATCH_MAX)) {
         if (state.stop) break;
-        const cmds = {}; grupo.forEach((l, i) => cmds['d' + i] = 'crm.lead.list?' + qs({ filter: { [CAMPOS.cnpj]: fmtCnpj(l.cnpj) }, select: ['ID'] }));
+        const cmds = {}; grupo.forEach((l, i) => cmds['d' + i] = 'crm.lead.list?' + qs({ filter: { [CAMPOS.cnpj]: fmtCnpj(l.cnpj) }, select: ['ID', 'ASSIGNED_BY_ID'] }));
         const r = await batch(cmds);
-        grupo.forEach((l, i) => { const ex = r.result['d' + i]; if (ex && ex.length) existentes.set(l.cnpj, ex.map(x => x.ID).join(' ')); });
+        grupo.forEach((l, i) => { const ex = r.result['d' + i]; if (ex && ex.length) existentes.set(l.cnpj, ex); });
         feito += grupo.length; setProgress(feito, fila.length, `Verificando duplicados: ${feito}/${fila.length}`);
       }
       if (existentes.size) {
-        log(`${existentes.size} CNPJs já existem no Bitrix24 e serão pulados.`, 'warn');
-        fila.filter(l => existentes.has(l.cnpj)).forEach(l => relatorio.push({ l, status: 'Pulado (já existe: lead ' + existentes.get(l.cnpj) + ')' }));
+        log(`${existentes.size} CNPJs já existem no Bitrix24: não serão cadastrados de novo; os contatos deles vão para as listas do responsável atual.`, 'warn');
+        for (const [cnpj, leads] of existentes) for (const x of leads) existentesInfo.push({ cnpj, leadId: x.ID, sellerId: String(x.ASSIGNED_BY_ID), contatos: [] });
+        await lerContatosExistentes(existentesInfo);
+        fila.filter(l => existentes.has(l.cnpj)).forEach(l => {
+          const info = existentesInfo.filter(e => e.cnpj === l.cnpj);
+          relatorio.push({ l, existente: info, status: 'Já existe: ' + info.map(e => `lead ${e.leadId} (resp. ${e.sellerId}, ${e.contatos.length} contato(s))`).join(' / ') });
+        });
         fila = fila.filter(l => !existentes.has(l.cnpj));
       }
     }
@@ -468,7 +475,7 @@ $('btnStart').onclick = async () => {
     }
     if (state.stop) log('Importação interrompida pelo usuário.', 'warn');
     log(`Concluído: ${sucesso.length} leads ${dry ? 'simulados' : 'cadastrados'}, ${erros} com erro.`, erros ? 'warn' : 'ok');
-    gerarSaida(sucesso, relatorio, sellers, dry);
+    await gerarSaida(sucesso, existentesInfo, relatorio, sellers, dry);
   } catch (e) {
     log('ERRO: ' + e.message, 'err'); alert('Erro: ' + e.message);
   } finally {
@@ -476,34 +483,82 @@ $('btnStart').onclick = async () => {
   }
 };
 
+/* ---------------- contatos de leads já existentes ---------------- */
+function normFone(v) {
+  let d = digits(v);
+  if (!d) return '';
+  if (!(d.length >= 12 && d.startsWith('55'))) d = '55' + d;   // mesmo formato: 55+DDD+número, sem "+"
+  return d;
+}
+async function lerContatosExistentes(infos) {
+  // a) IDs dos contatos vinculados a cada lead existente
+  let feito = 0;
+  for (const grupo of chunks(infos, BATCH_MAX)) {
+    if (state.stop) return;
+    const cmds = {}; grupo.forEach((e, i) => cmds['v' + i] = 'crm.lead.contact.items.get?' + qs({ id: e.leadId }));
+    const r = await batch(cmds);
+    grupo.forEach((e, i) => e.contatoIds = (r.result['v' + i] || []).map(x => String(x.CONTACT_ID)));
+    feito += grupo.length; setProgress(feito, infos.length, `Lendo vínculos dos leads existentes: ${feito}/${infos.length}`);
+  }
+  // b) telefones de cada contato (ordem do Bitrix: o 1º telefone vai para a Lista A)
+  const ids = [...new Set(infos.flatMap(e => e.contatoIds || []))];
+  const fones = new Map(); feito = 0;
+  for (const grupo of chunks(ids, BATCH_MAX)) {
+    if (state.stop) return;
+    const cmds = {}; grupo.forEach(id => cmds['c' + id] = 'crm.contact.get?' + qs({ id }));
+    const r = await batch(cmds);
+    grupo.forEach(id => { const c = r.result['c' + id]; const lista = []; (c?.PHONE || []).forEach(p => { const f = normFone(p.VALUE); if (f && !lista.includes(f)) lista.push(f); }); fones.set(id, lista); });
+    feito += grupo.length; setProgress(feito, ids.length, `Lendo telefones dos contatos existentes: ${feito}/${ids.length}`);
+  }
+  for (const e of infos) e.contatos = (e.contatoIds || []).map(id => fones.get(id) || []).filter(f => f.length);
+  const semContato = infos.filter(e => !e.contatos.length).length;
+  log(`Leads existentes: ${infos.length} (${ids.length} contatos lidos${semContato ? `, ${semContato} sem contato com telefone — nada vai para as listas` : ''}).`);
+}
+
 /* ---------------- listas A/B ---------------- */
-function gerarSaida(sucesso, relatorio, sellers, dry) {
+async function gerarSaida(sucesso, existentesInfo, relatorio, sellers, dry) {
   const data = hoje(), arquivos = [];
   const linhas = [];
-  for (const s of sellers) {
+  // vendedores: os informados + responsáveis de leads existentes que não estão entre eles
+  const todos = [...sellers];
+  const extras = [...new Set(existentesInfo.filter(e => e.contatos.length).map(e => e.sellerId))].filter(id => !todos.some(s => s.id === id));
+  if (extras.length) {
+    const nomes = {};
+    try {
+      const cmds = {}; extras.forEach(id => cmds['u' + id] = 'user.get?' + qs({ ID: id }));
+      const r = await batch(cmds); extras.forEach(id => { const u = (r.result['u' + id] || [])[0]; if (u) nomes[id] = clean(`${u.NAME} ${u.LAST_NAME}`); });
+    } catch (e) { log('Não foi possível ler nomes dos responsáveis: ' + e.message, 'warn'); }
+    extras.forEach(id => todos.push({ id, nome: nomes[id] || 'Usuario ' + id, extra: true }));
+  }
+  for (const s of todos) {
     const meus = sucesso.filter(l => l.seller === s);
+    const exist = existentesInfo.filter(e => e.sellerId === s.id && e.contatos.length);
     const A = [], B = [];
-    meus.forEach(l => l.pessoasOk.forEach(p => { if (!A.includes(p.fones[0])) A.push(p.fones[0]); p.fones.slice(1).forEach(f => { if (!B.includes(f)) B.push(f); }); }));
+    const add = fs => { if (!fs.length) return; if (!A.includes(fs[0])) A.push(fs[0]); fs.slice(1).forEach(f => { if (!B.includes(f)) B.push(f); }); };
+    meus.forEach(l => l.pessoasOk.forEach(p => add(p.fones)));
+    exist.forEach(e => e.contatos.forEach(add));
+    const B2 = B.filter(f => !A.includes(f));   // número que já está na Lista A não se repete na B
     const nome = safeName(s.nome);
-    if (meus.length) {
-      for (const [tipo, lista] of [['A', A], ['B', B]]) {
-        if (!lista.length) continue;
-        const base = `Lista ${tipo} - ${nome} - ${data}`;
-        arquivos.push({ nome: base + '.csv', conteudo: 'telefone\r\n' + lista.join('\r\n') + '\r\n' });
-        arquivos.push({ nome: base + '.txt', conteudo: lista.join('\r\n') + '\r\n' });
-      }
+    for (const [tipo, lista] of [['A', A], ['B', B2]]) {
+      if (!lista.length) continue;
+      const base = `Lista ${tipo} - ${nome} - ${data}`;
+      arquivos.push({ nome: base + '.csv', conteudo: 'telefone\r\n' + lista.join('\r\n') + '\r\n' });
+      arquivos.push({ nome: base + '.txt', conteudo: lista.join('\r\n') + '\r\n' });
     }
-    linhas.push(`<tr><td>${esc(s.nome)} (${s.id})</td><td>${meus.length}</td><td>${A.length}</td><td>${B.length}</td></tr>`);
+    linhas.push(`<tr><td>${esc(s.nome)} (${s.id})${s.extra ? ' <span class="hint">— responsável de leads existentes</span>' : ''}</td><td>${meus.length}</td><td>${new Set(exist.map(e => e.leadId)).size}</td><td>${A.length}</td><td>${B2.length}</td></tr>`);
   }
   const csvEsc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const rel = ['CNPJ;Razão Social;Vendedor;ID Vendedor;ID Lead;IDs Contatos;Status'].concat(relatorio.map(({ l, status }) =>
-    [fmtCnpj(l.cnpj), clean(l.emp.razao), l.seller?.nome, l.seller?.id, l.leadId, (l.contatoIds || []).join(' '), status].map(csvEsc).join(';'))).join('\r\n');
+  const nomeDe = id => (todos.find(s => s.id === id) || {}).nome || id;
+  const rel = ['CNPJ;Razão Social;Vendedor;ID Vendedor;ID Lead;IDs Contatos;Status'].concat(relatorio.map(({ l, status, existente }) => existente
+    ? [fmtCnpj(l.cnpj), clean(l.emp.razao), existente.map(e => nomeDe(e.sellerId)).join(' / '), existente.map(e => e.sellerId).join(' / '), existente.map(e => e.leadId).join(' / '), existente.flatMap(e => e.contatoIds || []).join(' '), status].map(csvEsc).join(';')
+    : [fmtCnpj(l.cnpj), clean(l.emp.razao), l.seller?.nome, l.seller?.id, l.leadId, (l.contatoIds || []).join(' '), status].map(csvEsc).join(';'))).join('\r\n');
   arquivos.push({ nome: `Relatorio importacao - ${data}.csv`, conteudo: '﻿' + rel + '\r\n' });
 
   state.output = arquivos;
   $('results').classList.remove('hidden');
-  $('summary').innerHTML = `<p>${dry ? '<b>Simulação</b> — ' : ''}<b>${sucesso.length}</b> leads ${dry ? 'simulados' : 'cadastrados'} e ${relatorio.length - sucesso.length} pulados/com erro.</p>`;
-  $('sellerTable').innerHTML = '<tr><th>Vendedor</th><th>Leads</th><th>Lista A (telefones)</th><th>Lista B (telefones)</th></tr>' + linhas.join('');
+  const nExist = relatorio.filter(r => r.existente).length;
+  $('summary').innerHTML = `<p>${dry ? '<b>Simulação</b> — ' : ''}<b>${sucesso.length}</b> leads ${dry ? 'simulados' : 'cadastrados'}, <b>${nExist}</b> já existiam (contatos do Bitrix incluídos nas listas) e ${relatorio.length - sucesso.length - nExist} com erro.</p>`;
+  $('sellerTable').innerHTML = '<tr><th>Vendedor</th><th>Leads novos</th><th>Leads existentes</th><th>Lista A (telefones)</th><th>Lista B (telefones)</th></tr>' + linhas.join('');
   $('fileLinks').innerHTML = '';
   for (const a of arquivos) {
     const link = document.createElement('a');

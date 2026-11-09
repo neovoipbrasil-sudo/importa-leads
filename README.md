@@ -15,7 +15,7 @@ Documentação usada: [crm.lead.add](https://apidocs.bitrix24.com/api-reference/
 - **Empresa sem pessoa física com telefone não é cadastrada.**
 - Telefones no formato `55` + DDD + número, sem `+`.
 - Distribuição igualitária (rodízio) entre os IDs de vendedores informados; contatos recebem o mesmo responsável do lead.
-- Opção de pular CNPJs que já existem como lead (campo "CNPJ do Cliente:").
+- CNPJs que já existem como lead (campo "CNPJ do Cliente:") não são recadastrados. Os telefones dos **contatos vinculados a esse lead no Bitrix** entram nas Listas A/B (1º telefone de cada contato → A, demais → B) do **responsável atual** do lead; se ele não estiver entre os vendedores informados, recebe listas próprias. Lead existente sem contato com telefone não entra nas listas.
 - **Lista A** = 1º telefone de cada sócio; **Lista B** = demais telefones dos sócios. Um arquivo por vendedor, em CSV e TXT:
   `Lista A - Vendedor - dd-mm-aaaa.csv` / `.txt` — mais um relatório da importação.
 
