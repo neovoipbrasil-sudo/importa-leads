@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Importador de Leads Bitrix24</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --text: #1d2433; --muted: #5f6b7d; --border: #dde2ea;
+    --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
+    --soft: #eef3fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1218; --card: #171b23; --text: #e6e9ef; --muted: #9aa4b5; --border: #2a303c;
+      --accent: #4c8dff; --accent-text: #0f1218; --ok: #3fb950; --warn: #d29922; --err: #f85149; --soft: #1c2330;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 16px; margin: 0 0 12px; display: flex; gap: 8px; align-items: center; }
+  .step { display: inline-flex; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-text); font-size: 13px; align-items: center; justify-content: center; flex: none; }
+  label { display: block; font-weight: 600; font-size: 13px; margin: 10px 0 4px; }
+  .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit;
+  }
+  input[type=file] { width: 100%; font: inherit; color: var(--text); }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+  .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin: 8px 0; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+  .stat { background: var(--soft); border-radius: 8px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .status { font-size: 13px; margin-top: 6px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  .tablewrap { overflow-x: auto; }
+  progress { width: 100%; height: 14px; }
+  #log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; height: 220px; overflow: auto; padding: 8px; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; margin-top: 10px; }
+  .files a { display: inline-block; margin: 4px 8px 4px 0; }
+  a { color: var(--accent); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Importador de Leads → Bitrix24</h1>
+  <p class="sub">Cruza a lista de empresas com a lista de contatos pelo CNPJ, cadastra os leads com seus contatos (sócios) e gera as Listas A e B por vendedor.</p>
+
+  <section class="card">
+    <h2><span class="step">1</span> Conexão com o Bitrix24</h2>
+    <label for="webhook">URL do webhook de entrada <span class="hint">(ex.: https://seuportal.bitrix24.com.br/rest/6/xxxxxxxx/)</span></label>
+    <input id="webhook" type="password" autocomplete="off" placeholder="https://.../rest/ID/TOKEN/">
+    <label class="check"><input type="checkbox" id="remember"> Lembrar neste navegador</label>
+    <div class="inline"><button id="btnTest">Testar conexão</button><span id="connStatus" class="status"></span></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">2</span> Arquivos</h2>
+    <div class="row">
+      <div>
+        <label for="fileEmp">Dados das empresas <span class="hint">(ex.: leads-empresaaqui.csv)</span></label>
+        <input id="fileEmp" type="file" accept=".csv,text/csv">
+        <div id="empStatus" class="status"></div>
+      </div>
+      <div>
+        <label for="fileCon">Contatos das empresas <span class="hint">(ex.: leads-enrriquecidos.csv)</span></label>
+        <input id="fileCon" type="file" accept=".csv,text/csv">
+        <div id="conStatus" class="status"></div>
+      </div>
+    </div>
+    <div id="stats" class="stats hidden"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">3</span> Vendedores e opções</h2>
+    <label for="sellers">IDs dos vendedores no Bitrix24 <span class="hint">(separados por vírgula, espaço ou linha)</span></label>
+    <input id="sellers" type="text" placeholder="ex.: 762, 768, 788">
+    <label class="check"><input type="checkbox" id="distribute" checked> Distribuir automaticamente e igualmente entre os vendedores informados <span class="hint">(desmarcado: todos os leads vão para o primeiro ID)</span></label>
+    <div class="inline"><button id="btnSellers">Validar vendedores</button><span id="sellerStatus" class="status"></span></div>
+    <div class="row">
+      <div>
+        <label for="stage">Etapa do lead</label>
+        <select id="stage"><option value="NEW">Novo Lead</option></select>
+      </div>
+      <div>
+        <label for="source">Fonte</label>
+        <select id="source"><option value="UC_8LRC4G">Outbound</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="limit">Limite de leads <span class="hint">(opcional — use para importar só alguns como teste)</span></label>
+        <input id="limit" type="number" min="1" placeholder="todos">
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <label class="check"><input type="checkbox" id="skipDup" checked> Pular CNPJs que já existem como lead no Bitrix24</label>
+        <label class="check"><input type="checkbox" id="dryRun"> Simulação (não grava nada no Bitrix24, só gera as listas)</label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">4</span> Importação</h2>
+    <div id="preview" class="status">Carregue os dois arquivos e informe os vendedores.</div>
+    <div class="inline" style="margin-top:10px">
+      <button id="btnStart" class="primary" disabled>Iniciar importação</button>
+      <button id="btnStop" disabled>Parar</button>
+    </div>
+    <div id="progressWrap" class="hidden" style="margin-top:12px">
+      <progress id="progress" value="0" max="100"></progress>
+      <div id="progressText" class="status"></div>
+    </div>
+    <div id="log" class="hidden"></div>
+  </section>
+
+  <section class="card hidden" id="results">
+    <h2><span class="step">5</span> Resultado e listas</h2>
+    <div id="summary"></div>
+    <div class="tablewrap"><table id="sellerTable"></table></div>
+    <div class="inline" style="margin-top:12px"><button id="btnZip" class="primary">Baixar tudo (ZIP)</button></div>
+    <div id="fileLinks" class="files" style="margin-top:8px"></div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+   CONFIGURAÇÃO — códigos dos campos personalizados do portal
+   (obtidos via crm.lead.fields). Ajuste aqui se mudarem.
+   ============================================================ */
+const CAMPOS = {
+  cnpj: 'UF_CRM_3E3A4896',           // CNPJ do Cliente:
+  razao: 'UF_CRM_3A0DB2C2',          // Razão Social do Cliente:
+  fantasia: 'UF_CRM_D96669F4',       // Nome Fantasia do Cliente:
+  simples: 'UF_CRM_E6A65B36',        // A empresa do Cliente é optante do Simples Nacional?
+  fundacao: 'UF_CRM_9E57F325',       // Data de Fundação da Empresa do Cliente:
+  socioNome: 'UF_CRM_10BA428E',      // Nome Completo do Sócio Principal:
+  socioCpf: 'UF_CRM_D11992D3',       // CPF do Sócio Principal:
+  socioCel: 'UF_CRM_9C2B5884',       // Celular do Sócio Principal:
+};
+const BATCH_MAX = 50;          // limite do método batch do Bitrix24
+const PAUSA_MS = 600;          // pausa entre chamadas (limite ~2 req/s)
+
+/* ---------------- utilidades ---------------- */
+const $ = id => document.getElementById(id);
+const digits = s => String(s ?? '').replace(/\D/g, '');
+const clean = s => String(s ?? '').replace(/\s+/g, ' ').trim();
+const norm = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmtCnpj = d => d.length === 14 ? `${d.slice(0,2)}.${d.slice(2,5)}.${d.slice(5,8)}/${d.slice(8,12)}-${d.slice(12)}` : d;
+const safeName = s => clean(s).replace(/[\\/:*?"<>|]/g, '-');
+function hoje() { const d = new Date(); return `${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}`; }
+
+function log(msg, cls) {
+  const el = $('log'); el.classList.remove('hidden');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line); el.scrollTop = el.scrollHeight;
+}
+
+/* ---------------- CSV ---------------- */
+function decode(buf) {
+  let txt = new TextDecoder('utf-8').decode(buf);
+  if (txt.includes('�')) txt = new TextDecoder('windows-1252').decode(buf);
+  return txt.replace(/^﻿/, '');
+}
+function parseCsv(text) {
+  const firstLine = text.slice(0, text.indexOf('\n') > 0 ? text.indexOf('\n') : text.length);
+  const delim = (firstLine.split(';').length > firstLine.split(',').length) ? ';' : ',';
+  const rows = []; let row = [], field = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i+1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === delim) { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i+1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some(v => v !== '')) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  row.push(field); if (row.some(v => v !== '')) rows.push(row);
+  const header = rows.shift().map(norm);
+  return { header, rows: rows.map(r => { const o = {}; header.forEach((h, i) => { if (!(h in o)) o[h] = (r[i] ?? '').trim(); }); return o; }) };
+}
+
+/* ---------------- estado ---------------- */
+const state = { empresas: null, contatos: null, leads: [], sellers: [], running: false, stop: false, output: null };
+
+const REQ_EMP = ['cnpj', 'razao', 'fantasia'];
+const REQ_CON = ['cpfcnpj', 'cpfcnpjatrelado', 'nomerazaosocial', 'ddd1', 'celular1'];
+
+async function readFile(input, required, statusEl) {
+  const f = input.files[0]; if (!f) return null;
+  const { header, rows } = parseCsv(decode(await f.arrayBuffer()));
+  const missing = required.filter(c => !header.includes(c));
+  if (missing.length) { statusEl.innerHTML = `<span class="err">Colunas não encontradas: ${esc(missing.join(', '))}. Confira se escolheu o arquivo certo.</span>`; return null; }
+  statusEl.innerHTML = `<span class="ok">${rows.length} linhas lidas de ${esc(f.name)}</span>`;
+  return rows;
+}
+
+function telefones(r) {
+  const out = [];
+  for (let i = 1; i <= 8; i++) {
+    const n = digits(r[(i <= 4 ? 'celular' : 'fone') + i]);
+    if (!n) continue;
+    let full = digits(r['ddd' + i]) + n;
+    if (!(full.length >= 12 && full.startsWith('55'))) full = '55' + full;   // formato 55+DDD+número, sem "+"
+    if (!out.includes(full)) out.push(full);
+  }
+  return out;
+}
+
+function montarLeads() {
+  if (!state.empresas || !state.contatos) return;
+  const porCnpj = new Map();
+  for (const c of state.contatos) {
+    const doc = digits(c.cpfcnpj);
+    if (doc.length > 11) continue;                     // linha da própria empresa (CNPJ): ignorada
+    const cnpj = digits(c.cpfcnpjatrelado).padStart(14, '0');
+    const fones = telefones(c);
+    if (!fones.length) continue;
+    const pessoa = { nome: clean(c.nomerazaosocial), cpf: doc.padStart(11, '0'), fones, emails: [c.email1, c.email2, c.email3].map(clean).filter(Boolean) };
+    if (!porCnpj.has(cnpj)) porCnpj.set(cnpj, []);
+    porCnpj.get(cnpj).push(pessoa);
+  }
+  const vistos = new Set(); state.leads = []; let semContato = 0, repetidas = 0;
+  for (const e of state.empresas) {
+    const cnpj = digits(e.cnpj).padStart(14, '0');
+    if (vistos.has(cnpj)) { repetidas++; continue; }
+    vistos.add(cnpj);
+    const pessoas = porCnpj.get(cnpj);
+    if (!pessoas || !pessoas.length) { semContato++; continue; }   // REGRA: lead sem contato não é cadastrado
+    state.leads.push({ cnpj, emp: e, pessoas });
+  }
+  const nPessoas = state.leads.reduce((s, l) => s + l.pessoas.length, 0);
+  const nA = nPessoas, nB = state.leads.reduce((s, l) => s + l.pessoas.reduce((t, p) => t + p.fones.length - 1, 0), 0);
+  $('stats').classList.remove('hidden');
+  $('stats').innerHTML = [
+    [state.empresas.length, 'empresas no arquivo'], [state.leads.length, 'leads com contato (serão cadastrados)'],
+    [semContato, 'empresas sem contato (ignoradas)'], [nPessoas, 'contatos (sócios)'], [nA, 'telefones Lista A'], [nB, 'telefones Lista B'],
+  ].concat(repetidas ? [[repetidas, 'CNPJs repetidos ignorados']] : []).map(([n, t]) => `<div class="stat"><b>${n}</b><span>${t}</span></div>`).join('');
+  atualizarPreview();
+}
+
+function parseSellerIds() { return [...new Set($('sellers').value.split(/[\s,;]+/).map(digits).filter(Boolean))]; }
+
+function atualizarPreview() {
+  const ids = parseSellerIds();
+  const ok = state.leads.length && ids.length;
+  $('btnStart').disabled = !ok || state.running;
+  if (!state.leads.length) { $('preview').textContent = 'Carregue os dois arquivos e informe os vendedores.'; return; }
+  if (!ids.length) { $('preview').textContent = `${state.leads.length} leads prontos. Informe os IDs dos vendedores.`; return; }
+  const lim = parseInt($('limit').value) || state.leads.length;
+  const total = Math.min(lim, state.leads.length);
+  const n = $('distribute').checked ? ids.length : 1;
+  const base = Math.floor(total / n), extra = total % n;
+  $('preview').innerHTML = `Até <b>${total}</b> leads → ` + (n === 1 ? `todos para o ID ${ids[0]}` : `≈ ${base}${extra ? '–' + (base + 1) : ''} por vendedor (${n} vendedores)`) +
+    ($('skipDup').checked ? '. CNPJs já existentes no Bitrix serão pulados antes da distribuição.' : '.') + ($('dryRun').checked ? ' <b>Modo simulação.</b>' : '');
+}
+
+/* ---------------- Bitrix24 REST ---------------- */
+function webhook() { let u = $('webhook').value.trim(); if (u && !u.endsWith('/')) u += '/'; return u; }
+function qs(obj, prefix) {
+  const parts = [];
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null || v === '') continue;
+    const key = prefix ? `${prefix}[${k}]` : k;
+    if (typeof v === 'object') { const s = qs(v, key); if (s) parts.push(s); }
+    else parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(v));
+  }
+  return parts.join('&');
+}
+async function call(method, params = {}, tentativa = 0) {
+  const url = webhook();
+  if (!url) throw new Error('Informe a URL do webhook.');
+  let res, json;
+  try {
+    res = await fetch(url + method + '.json', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
+    json = await res.json();
+  } catch (e) {
+    if (tentativa < 4) { await sleep(2000 * (tentativa + 1)); return call(method, params, tentativa + 1); }
+    throw new Error('Falha de rede: ' + e.message);
+  }
+  if (json.error) {
+    if ((json.error === 'QUERY_LIMIT_EXCEEDED' || res.status === 503) && tentativa < 6) { await sleep(2000 * (tentativa + 1)); return call(method, params, tentativa + 1); }
+    throw new Error(`${json.error}: ${json.error_description || ''}`);
+  }
+  await sleep(PAUSA_MS);
+  return json.result;
+}
+async function batch(cmds) {   // cmds: {chave: 'metodo?query'}
+  const r = await call('batch', { halt: 0, cmd: cmds });
+  return { result: r.result || {}, errors: Array.isArray(r.result_error) ? {} : (r.result_error || {}) };
+}
+function chunks(arr, n) { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; }
+
+/* ---------------- montagem dos registros ---------------- */
+function contatoFields(p, lead, sellerId) {
+  const partes = p.nome.split(' ');
+  return {
+    NAME: partes[0], LAST_NAME: partes.slice(1).join(' '),
+    PHONE: p.fones.map(v => ({ VALUE: v, VALUE_TYPE: 'MOBILE' })),
+    EMAIL: p.emails.length ? p.emails.map(v => ({ VALUE: v, VALUE_TYPE: 'WORK' })) : undefined,
+    ASSIGNED_BY_ID: sellerId, SOURCE_ID: $('source').value, OPENED: 'Y',
+    COMMENTS: `CPF: ${p.cpf} | Sócio de ${clean(lead.emp.razao)} (CNPJ ${fmtCnpj(lead.cnpj)})`,
+  };
+}
+function leadFields(lead, sellerId, contatoIds, pessoasOk) {
+  const e = lead.emp, raz = clean(e.razao), fant = clean(e.fantasia), socio = pessoasOk[0];
+  const fonesA = pessoasOk.map(p => p.fones[0]);
+  const coment = [['Porte', e.porteempresa], ['Regime', e.regimetributario], ['Faturamento estimado', e.faturamentoestimado], ['Funcionários', e.quadrodefuncionarios],
+    ['Capital social', e.capitalsocialdaempresa], ['Natureza jurídica', e.naturezajuridica], ['Situação', e.situacaocad]].filter(([, v]) => clean(v)).map(([k, v]) => `${k}: ${clean(v)}`).join('<br>');
+  return {
+    TITLE: fant || raz, COMPANY_TITLE: raz, STATUS_ID: $('stage').value, SOURCE_ID: $('source').value, OPENED: 'Y',
+    ASSIGNED_BY_ID: sellerId, CONTACT_IDS: contatoIds,
+    PHONE: fonesA.map(v => ({ VALUE: v, VALUE_TYPE: 'MOBILE' })),
+    ADDRESS: clean(`${e.tipo || ''} ${e.endereco || ''}`) + (clean(e.numero) ? `, ${clean(e.numero)}` : ''),
+    ADDRESS_2: [clean(e.complemento), clean(e.bairro)].filter(Boolean).join(' - '),
+    ADDRESS_CITY: clean(e.cidade), ADDRESS_PROVINCE: clean(e.uf), ADDRESS_POSTAL_CODE: clean(e.cep), ADDRESS_COUNTRY: 'Brasil',
+    [CAMPOS.cnpj]: fmtCnpj(lead.cnpj), [CAMPOS.razao]: raz, [CAMPOS.fantasia]: fant,
+    [CAMPOS.simples]: /SIMPLES/i.test(e.regimetributario || '') ? 'Sim' : 'Não',
+    [CAMPOS.fundacao]: clean(e.datainicioatv),
+    [CAMPOS.socioNome]: socio.nome, [CAMPOS.socioCpf]: socio.cpf, [CAMPOS.socioCel]: socio.fones[0],
+    COMMENTS: coment,
+  };
+}
+
+/* ---------------- ações ---------------- */
+$('btnTest').onclick = async () => {
+  $('connStatus').textContent = 'Testando…';
+  try {
+    const u = await call('user.current');
+    $('connStatus').innerHTML = `<span class="ok">Conectado como ${esc(u.NAME)} ${esc(u.LAST_NAME)} (ID ${esc(u.ID)})</span>`;
+    salvarWebhook(); await carregarListas();
+  } catch (e) { $('connStatus').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
+async function carregarListas() {
+  const r = await batch({ s: 'crm.status.list?' + qs({ filter: { ENTITY_ID: 'STATUS' } }), f: 'crm.status.list?' + qs({ filter: { ENTITY_ID: 'SOURCE' } }) });
+  const fill = (sel, items, def) => { if (!items) return; const cur = sel.value || def; sel.innerHTML = items.map(i => `<option value="${esc(i.STATUS_ID)}">${esc(i.NAME)}</option>`).join(''); sel.value = items.some(i => i.STATUS_ID === cur) ? cur : def; };
+  fill($('stage'), r.result.s, 'NEW'); fill($('source'), r.result.f, 'UC_8LRC4G');
+}
+function salvarWebhook() { try { if ($('remember').checked) localStorage.setItem('bx_webhook', $('webhook').value.trim()); else localStorage.removeItem('bx_webhook'); } catch (e) {} }
+try { const w = localStorage.getItem('bx_webhook'); if (w) { $('webhook').value = w; $('remember').checked = true; } } catch (e) {}
+$('remember').onchange = salvarWebhook;
+
+async function validarVendedores() {
+  const ids = parseSellerIds();
+  if (!ids.length) throw new Error('Informe ao menos um ID de vendedor.');
+  if ($('dryRun').checked && !webhook()) return ids.map(id => ({ id, nome: 'Vendedor ' + id }));
+  const cmds = {}; ids.forEach(id => cmds['u' + id] = 'user.get?' + qs({ ID: id }));
+  const r = await batch(cmds);
+  const out = [], faltando = [];
+  for (const id of ids) {
+    const u = (r.result['u' + id] || [])[0];
+    if (!u) faltando.push(id); else out.push({ id, nome: clean(`${u.NAME} ${u.LAST_NAME}`) || 'Vendedor ' + id, ativo: u.ACTIVE });
+  }
+  if (faltando.length) throw new Error('IDs não encontrados no Bitrix24: ' + faltando.join(', '));
+  const inativos = out.filter(u => u.ativo === false || u.ativo === 'N');
+  if (inativos.length) throw new Error('Usuários inativos: ' + inativos.map(u => `${u.nome} (${u.id})`).join(', '));
+  return out;
+}
+$('btnSellers').onclick = async () => {
+  $('sellerStatus').textContent = 'Validando…';
+  try { const s = await validarVendedores(); $('sellerStatus').innerHTML = `<span class="ok">${s.map(v => `${esc(v.nome)} (${v.id})`).join(', ')}</span>`; }
+  catch (e) { $('sellerStatus').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
+
+$('fileEmp').onchange = async () => { state.empresas = await readFile($('fileEmp'), REQ_EMP, $('empStatus')); montarLeads(); };
+$('fileCon').onchange = async () => { state.contatos = await readFile($('fileCon'), REQ_CON, $('conStatus')); montarLeads(); };
+['sellers', 'limit'].forEach(id => $(id).addEventListener('input', atualizarPreview));
+['distribute', 'skipDup', 'dryRun'].forEach(id => $(id).addEventListener('change', atualizarPreview));
+$('btnStop').onclick = () => { state.stop = true; log('Parada solicitada — terminando o lote atual…', 'warn'); };
+
+function setProgress(done, total, txt) {
+  $('progressWrap').classList.remove('hidden');
+  $('progress').max = total || 1; $('progress').value = done;
+  $('progressText').textContent = txt;
+}
+
+$('btnStart').onclick = async () => {
+  const dry = $('dryRun').checked;
+  if (!dry && !webhook()) { alert('Informe a URL do webhook (passo 1).'); return; }
+  let sellers;
+  try { sellers = await validarVendedores(); } catch (e) { alert(e.message); return; }
+  if (!$('distribute').checked) sellers = sellers.slice(0, 1);
+  const lim = parseInt($('limit').value) || state.leads.length;
+  let fila = state.leads.slice(0, lim);
+  if (!dry && !confirm(`Cadastrar até ${fila.length} leads no Bitrix24 para ${sellers.map(s => s.nome).join(', ')}?`)) return;
+
+  state.running = true; state.stop = false; state.sellers = sellers;
+  $('btnStart').disabled = true; $('btnStop').disabled = false; $('results').classList.add('hidden');
+  $('log').innerHTML = '';
+  const relatorio = [];   // linhas do relatório
+  log(dry ? 'MODO SIMULAÇÃO — nada será gravado.' : 'Iniciando importação.');
+
+  try {
+    // 1) duplicados
+    if ($('skipDup').checked && webhook()) {
+      log('Verificando CNPJs já existentes no Bitrix24…');
+      const existentes = new Map(); let feito = 0;
+      for (const grupo of chunks(fila, BATCH_MAX)) {
+        if (state.stop) break;
+        const cmds = {}; grupo.forEach((l, i) => cmds['d' + i] = 'crm.lead.list?' + qs({ filter: { [CAMPOS.cnpj]: fmtCnpj(l.cnpj) }, select: ['ID'] }));
+        const r = await batch(cmds);
+        grupo.forEach((l, i) => { const ex = r.result['d' + i]; if (ex && ex.length) existentes.set(l.cnpj, ex.map(x => x.ID).join(' ')); });
+        feito += grupo.length; setProgress(feito, fila.length, `Verificando duplicados: ${feito}/${fila.length}`);
+      }
+      if (existentes.size) {
+        log(`${existentes.size} CNPJs já existem no Bitrix24 e serão pulados.`, 'warn');
+        fila.filter(l => existentes.has(l.cnpj)).forEach(l => relatorio.push({ l, status: 'Pulado (já existe: lead ' + existentes.get(l.cnpj) + ')' }));
+        fila = fila.filter(l => !existentes.has(l.cnpj));
+      }
+    }
+    // 2) distribuição igualitária (round-robin) sobre o que será de fato importado
+    fila.forEach((l, i) => l.seller = sellers[i % sellers.length]);
+    log(`Distribuição: ${sellers.map(s => `${s.nome}: ${fila.filter(l => l.seller === s).length}`).join(' | ')}`);
+
+    // 3) cadastro em lotes: contatos primeiro, depois os leads com os contatos criados
+    const sucesso = [];
+    const grupos = []; let atual = [], nCmd = 0;
+    for (const l of fila) { if (nCmd + l.pessoas.length > BATCH_MAX && atual.length) { grupos.push(atual); atual = []; nCmd = 0; } atual.push(l); nCmd += l.pessoas.length; }
+    if (atual.length) grupos.push(atual);
+    let feitos = 0, erros = 0;
+    for (const g of grupos) {
+      if (state.stop) break;
+      // contatos
+      const cmdC = {};
+      g.forEach((l, li) => l.pessoas.forEach((p, pi) => cmdC[`c${li}_${pi}`] = 'crm.contact.add?' + qs({ fields: contatoFields(p, l, l.seller.id) })));
+      const rc = dry ? { result: Object.fromEntries(Object.keys(cmdC).map(k => [k, 'SIM'])), errors: {} } : await batch(cmdC);
+      // leads
+      const cmdL = {}, prontos = [];
+      g.forEach((l, li) => {
+        const ids = [], ok = [];
+        l.pessoas.forEach((p, pi) => { const id = rc.result[`c${li}_${pi}`]; if (id) { ids.push(id); ok.push(p); } else log(`Contato falhou (${p.nome}, CNPJ ${fmtCnpj(l.cnpj)}): ${JSON.stringify(rc.errors[`c${li}_${pi}`] || '')}`, 'err'); });
+        if (!ids.length) { erros++; relatorio.push({ l, status: 'Erro: nenhum contato criado — lead não cadastrado' }); return; }
+        l.contatoIds = ids; l.pessoasOk = ok; prontos.push(l);
+        cmdL['l' + li] = 'crm.lead.add?' + qs({ fields: leadFields(l, l.seller.id, ids, ok), params: { REGISTER_SONET_EVENT: 'N' } });
+        l._k = 'l' + li;
+      });
+      const rl = dry ? { result: Object.fromEntries(Object.keys(cmdL).map(k => [k, 'SIM'])), errors: {} } : (Object.keys(cmdL).length ? await batch(cmdL) : { result: {}, errors: {} });
+      for (const l of prontos) {
+        const id = rl.result[l._k];
+        if (id) { l.leadId = id; sucesso.push(l); relatorio.push({ l, status: dry ? 'Simulado' : 'Cadastrado' }); }
+        else { erros++; relatorio.push({ l, status: 'Erro no lead: ' + JSON.stringify(rl.errors[l._k] || '') + ' (contatos órfãos: ' + l.contatoIds.join(' ') + ')' }); log(`Lead falhou (CNPJ ${fmtCnpj(l.cnpj)}): ${JSON.stringify(rl.errors[l._k] || '')}`, 'err'); }
+      }
+      feitos += g.length;
+      setProgress(feitos, fila.length, `${feitos}/${fila.length} processados — ${sucesso.length} cadastrados, ${erros} erros`);
+    }
+    if (state.stop) log('Importação interrompida pelo usuário.', 'warn');
+    log(`Concluído: ${sucesso.length} leads ${dry ? 'simulados' : 'cadastrados'}, ${erros} com erro.`, erros ? 'warn' : 'ok');
+    gerarSaida(sucesso, relatorio, sellers, dry);
+  } catch (e) {
+    log('ERRO: ' + e.message, 'err'); alert('Erro: ' + e.message);
+  } finally {
+    state.running = false; $('btnStop').disabled = true; atualizarPreview();
+  }
+};
+
+/* ---------------- listas A/B ---------------- */
+function gerarSaida(sucesso, relatorio, sellers, dry) {
+  const data = hoje(), arquivos = [];
+  const linhas = [];
+  for (const s of sellers) {
+    const meus = sucesso.filter(l => l.seller === s);
+    const A = [], B = [];
+    meus.forEach(l => l.pessoasOk.forEach(p => { if (!A.includes(p.fones[0])) A.push(p.fones[0]); p.fones.slice(1).forEach(f => { if (!B.includes(f)) B.push(f); }); }));
+    const nome = safeName(s.nome);
+    if (meus.length) {
+      for (const [tipo, lista] of [['A', A], ['B', B]]) {
+        if (!lista.length) continue;
+        const base = `Lista ${tipo} - ${nome} - ${data}`;
+        arquivos.push({ nome: base + '.csv', conteudo: 'telefone\r\n' + lista.join('\r\n') + '\r\n' });
+        arquivos.push({ nome: base + '.txt', conteudo: lista.join('\r\n') + '\r\n' });
+      }
+    }
+    linhas.push(`<tr><td>${esc(s.nome)} (${s.id})</td><td>${meus.length}</td><td>${A.length}</td><td>${B.length}</td></tr>`);
+  }
+  const csvEsc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rel = ['CNPJ;Razão Social;Vendedor;ID Vendedor;ID Lead;IDs Contatos;Status'].concat(relatorio.map(({ l, status }) =>
+    [fmtCnpj(l.cnpj), clean(l.emp.razao), l.seller?.nome, l.seller?.id, l.leadId, (l.contatoIds || []).join(' '), status].map(csvEsc).join(';'))).join('\r\n');
+  arquivos.push({ nome: `Relatorio importacao - ${data}.csv`, conteudo: '﻿' + rel + '\r\n' });
+
+  state.output = arquivos;
+  $('results').classList.remove('hidden');
+  $('summary').innerHTML = `<p>${dry ? '<b>Simulação</b> — ' : ''}<b>${sucesso.length}</b> leads ${dry ? 'simulados' : 'cadastrados'} e ${relatorio.length - sucesso.length} pulados/com erro.</p>`;
+  $('sellerTable').innerHTML = '<tr><th>Vendedor</th><th>Leads</th><th>Lista A (telefones)</th><th>Lista B (telefones)</th></tr>' + linhas.join('');
+  $('fileLinks').innerHTML = '';
+  for (const a of arquivos) {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([a.conteudo], { type: a.nome.endsWith('.csv') ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' }));
+    link.download = a.nome; link.textContent = a.nome;
+    $('fileLinks').appendChild(link);
+  }
+}
+$('btnZip').onclick = async () => {
+  if (!state.output) return;
+  if (typeof JSZip === 'undefined') { alert('Não foi possível carregar o compactador (sem internet?). Use os links individuais.'); return; }
+  const zip = new JSZip(); state.output.forEach(a => zip.file(a.nome, a.conteudo));
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `Listas - ${hoje()}.zip`; link.click();
+};
+
+// gancho para testes automatizados: carrega CSVs a partir de texto
+window.__carregarTexto = (tipo, texto) => {
+  const { header, rows } = parseCsv(texto);
+  if (tipo === 'emp') state.empresas = rows; else state.contatos = rows;
+  (tipo === 'emp' ? $('empStatus') : $('conStatus')).innerHTML = `<span class="ok">${rows.length} linhas lidas</span>`;
+  montarLeads(); return { header, n: rows.length };
+};
+</script>
+</body>
+</html>
